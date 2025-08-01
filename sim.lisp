@@ -3,11 +3,7 @@
 ;; на Common Lisp с использованием bordeaux-threads
 
 (ql:quickload "bordeaux-threads")
-
-(defpackage :dsl-threadpool
-  (:use :cl :bordeaux-threads))
-
-(in-package :dsl-threadpool)
+(ql:quickload "cl-cpus")
 
 ;;; --- Простая очередь FIFO ---
 
@@ -56,7 +52,7 @@
 (defparameter *worker-threads* nil
   "Список потоков-воркеров.")
 
-;;; --- DSL: структура задачи с ограниченным API ---
+;;; --- make-task macro API ---
 
 (defmacro make-task ((&key name) &body body)
   (let ((name (if (null name)
@@ -69,18 +65,7 @@
                 (bt:thread-name (bt:current-thread))))
        (lambda () ,@body))))
 
-
 ;;; --- Реализация пула воркеров ---
-
-(defun make-worker-pool (size)
-  "Создает пул из SIZE воркеров, запускает их и возвращает список потоков."
-  (loop for i from 1 to size :collect (bt:make-thread
-                                       (lambda () (worker-loop))
-                                       :name (format nil "worker-~A" i))))
-
-(defmacro define-worker-pool (name &key size)
-  "Определяет пул воркеров с именем NAME и количеством SIZE."
-  `(setf ,name (make-worker-pool ,size)))
 
 (defun worker-loop ()
   "Цикл воркера: достать задачу и выполнить"
@@ -88,7 +73,8 @@
     (let ((task (bt:with-lock-held (*queue-lock*)
                   ;; ждем задачу или timeout
                   (unless (queue-dequeue *global-queue*)
-                    (bt:condition-wait *queue-cond* *queue-lock* :timeout 0.1))
+                    (bt:condition-wait *queue-cond* *queue-lock*
+                                       :timeout 0.1))
                   ;; после пробуждения пытаемся снова
                   (queue-dequeue *global-queue*))))
       (when task
@@ -96,6 +82,13 @@
             (funcall task)
           (error (e)
             (format *error-output* "Error in task: ~A~%" e)))))))
+
+(defun make-worker-pool (size)
+  "Создает пул из SIZE воркеров, запускает их и возвращает список потоков."
+  (loop for i from 1 to size
+        collect (bt:make-thread
+                 (lambda () (worker-loop))
+                 :name (format nil "worker-~A" i))))
 
 ;;; --- Операции над задачами ---
 
@@ -105,13 +98,12 @@
     (bt:condition-notify *queue-cond*))
   task)
 
-;;; --- Пример использования ---
+;;; --- Пример ---
 
-;; Определяем пул из 4 воркеров:
-(define-worker-pool *pool* :size 4)
+;; Определяем пул из воркеров:
+(defparameter *pool* (make-worker-pool (cpus:get-number-of-processors)))
 
 ;; Отправляем задачи:
-
 (push-task (make-task ()
              (display
               (concatenate 'string "Hello from "
